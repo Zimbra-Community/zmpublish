@@ -1,0 +1,63 @@
+#
+# zmpublish configuration file.
+#
+# Use this file with zmpublish -c
+#
+
+#
+# Publisher configuration
+#
+# Use Publish<Number> to specify several publisher jobs.
+# WARNING! They will be processed in the order they appear in the config-file,
+# the number is used to only separate the publishers.
+#
+# Example:
+#
+# [Publish0]
+#
+# # Name of the publisher. Will be used in ldap later (see below)
+#
+# name = Global Addressbook myzimbradomain.com
+#
+# # What's the url to the Zimbra server?
+#
+# server_url = https://myzimbraserver.company.com
+#
+# # What Domain is used in zimbra?
+#
+# domain = myzimbradomain.com
+#
+# # What's the preauth key for that domain. See http://wiki.zimbra.com/index.php?title=Preauth#Preparing_a_domain_for_preauth
+#
+# preauth = 4e2816f16c44fab20ecdee39fb850c3b0bb54d03f1d8e073aaea376a4f407f0c
+#
+# # Who has our addressbook?
+#
+# account = john.doe@myzimbradomain.com
+#
+# # What's the name of the addressbook.
+#
+# addressbook_name = Contacts
+#
+# # LDAP-configuration.
+# # Enter the ldap-url, the base-dn, the bind-uid and the bind password
+# # zmprov will create an ou-entry below the base-dn with the name you gave earlier.
+#
+# ldap_url = ldap://myldapserver.company.com:389/
+# base_dn = o=addressbooks,dc=company,dc=com
+# bind_uid = cn=admin,dc=company,dc=com
+# bind_pw = secret
+#
+# # Drop or don't drop ldap-tree before pushing the data?
+# # put 1 to drop, 0 to skip dropping
+#
+# drop = 1
+
+#
+# Global configurations
+#
+# Normally you don't have to change something here.
+#
+[Global]
+
+

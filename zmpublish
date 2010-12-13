@@ -1,0 +1,463 @@
+#!/usr/bin/perl
+#
+# zmpublish - Publishes calendars into an existing ldap-server
+#
+# @version 0.1b
+# @author Dennis Ploeger <develop@dieploegers.de>
+#
+# Fetches vcards of several contact lists and puts these contacts into
+# an ldap tree.
+#
+# We use Zimbra's preauth-mechanism, so the domain has to be preauth-aware.
+# See http://wiki.zimbra.com/index.php?title=Preauth#Preparing_a_domain_for_preauth
+#
+# We use preauth to generate a cookie, that we use to fetch the contact-list
+# We then map the contact list to ldap-parameters and build a tree in the ldap.
+# We simply drop the tree and rebuild it, because sync'ing it would be too
+# much time and too much headache ;)
+#
+# You can specify a parameter named "drop" and set it to 0 in your configuration file to
+# skip the drop-statement. (If you'd like to put two sources into one ldap tree
+# for example). Be sure to drop the tree in the first publisher, though, or else
+# you will be creating masses of old data.
+
+#
+# Inclusion of modules
+#
+
+use Net::LDAP;
+use WWW::Curl;
+use Getopt::Std;
+use Config::Std;
+use Data::Dumper;
+use File::Temp qw/ :POSIX /;
+use WWW::Curl::Easy;
+use Digest::SHA qw(hmac_sha1_hex);
+
+#
+# VCF -> LDAP-Mapping
+#
+
+my %map = (
+
+    'cn' => '^FN:(?<cn>.*)$',
+    'sn|givenname' => '^N:(?<sn>[^;]*);(?<givenname>[^;]*);.*$',
+    'street|l|st|postalCode' => '^ADR;TYPE=work,postal,parcel.;;(?<street>[^;]*);(?<l>[^;]*);(?<st>[^;]*);(?<postalCode>[^;]*);.*$',
+    'telephoneNumber' => '^TEL;TYPE=work,voice:(?<telephoneNumber>.*)$',
+    'facsimileTelephoneNumber' => '^TEL;TYPE=work,fax:(?<facsimileTelephoneNumber>.*)$',
+    'mobile' => '^TEL;TYPE=cell,voice:(?<mobile>.*)$',
+    'mail' => '^EMAIL;TYPE=internet:(?<mail>.*)$',
+    'labeleduri' => 'URL;(?<labeleduri>.*)$',
+    'o|ou' => '^ORG:(?<o>[^;]*);?(?<ou>.*)$',
+    'description' => '^NOTE:(?<description>.*)$',
+
+);
+
+#
+# If a certain field is empty, use what field?
+#
+
+my %alternatives = (
+
+    'sn' => 'o',
+    'sn' => 'cn',
+
+);
+
+#
+# functions
+#
+
+sub usage {
+
+	print "zmpublish [options]\n";
+	print "\t-h\tShow this help\n";
+	print "\t-c {file}\tConfiguration file\n";
+	print "\t-f Continue on errors\n\n";
+
+	exit 1;
+
+}
+
+sub run_command {
+
+    my @params = @_;
+
+    my $command = $params[0];
+
+    my $tempfile_stderr = tmpnam();
+    my $tempfile_stdout = tmpnam();
+
+    system("$command 2>$tempfile_stderr 1>$tempfile_stdout");
+   
+    if ($? == -1) {
+
+	fault("Cannot run command.\n\n$command\n\n", $force);
+
+    } 
+
+    $retvalue = $? >> 8;
+
+    open (COMMAND_ERR, "<$tempfile_stderr");
+    chomp ($stderr = <COMMAND_ERR>);
+    close (COMMAND_ERR);
+
+    open (COMMAND_OUT, "<$tempfile_stdout");
+    chomp ($stdout = <COMMAND_OUT>);
+    close (COMMAND_OUT);
+
+    unlink ($tempfile_stderr);
+    unlink ($tempfile_stdout);
+
+    return ($stdout, $stderr, $retvalue);
+
+}
+
+#
+# Error output
+#
+
+sub fault {
+
+    my  @params = @_;
+    
+    my $errortext = $params[0];
+    my $continue = $params[1] or 0;
+
+    print STDERR $errortext."\n";
+
+    if ($continue) {
+
+        print STDERR "Continuing by command.\n";
+
+    } else {
+
+        exit 1;
+
+    }
+
+}
+
+#
+# main
+#
+
+# Parse commandline options
+
+my $valid_options = "hc:f";
+my %opts;
+
+getopts($valid_options, \%opts);
+
+usage() if $opts{h};
+
+my $config_file = $opts{c};
+
+my $force;
+
+$force = 1 if $opts{f};
+
+# Read in configuration
+
+if (!-r $config_file) {
+
+	print "Can't read configuration.\n\n";
+
+	usage();
+
+}
+
+read_config $config_file => %config;
+
+# Parse config
+
+my @publishers;
+
+for (keys(%config)) {
+
+    if (/Publish([\d]*)/i) {
+
+        push(@publishers, $_); 
+
+    }
+
+}
+
+# Synchronize with ldap
+
+my $command;
+my $stdout;
+my $stderr;
+my $retvalue;
+
+for (@publishers) {
+
+    my %publish_config = %{$config{$_}};
+
+    # Connect to LDAP-Server
+
+    my $ldap;
+
+    $ldap = Net::LDAP->new($publish_config{ldap_url});
+
+    if (!$ldap) {
+
+	fault("Cannot connect to LDAP-Server URL ".$publish_config{ldap_url}.".\n");
+
+    }
+
+    my $ldapres;
+
+    $ldapres = $ldap->bind( $publish_config{bind_uid}, password => $publish_config{bind_pw} ); 
+
+    if ($ldapres->code != 0) {
+
+        fault("Cannot bind to LDAP-Server with URL ".$publish_config{ldap_url}.": ".$ldapres->error.".\n");
+
+    }
+
+    # generate preauth. We use the standard expiration time here.
+
+    my $timestamp = time()*1000;
+
+    my $preauth = $publish_config{account}."|name|0|".$timestamp;
+
+    $preauth = hmac_sha1_hex($preauth, $publish_config{preauth});
+
+    # do preauth and get cookie
+
+    my $url = $publish_config{server_url}."/service/preauth?account=".$publish_config{account}."&by=name&timestamp=".$timestamp."&expires=0&preauth=".$preauth;
+
+    my $cookiejar = tmpnam();
+
+    my $curl = new WWW::Curl::Easy;
+
+    $curl->setopt(CURLOPT_COOKIEJAR, $cookiejar);    
+    $curl->setopt(CURLOPT_URL, $url);
+    $curl->setopt(CURLOPT_RETURNTRANSFER, 1);
+    $curl->setopt(CURLOPT_SSL_VERIFYPEER, 0);
+
+    $curl->perform(); 
+
+    if ($curl->getinfo(CURLINFO_HTTP_CODE) != 302) {
+
+        fault("Can't call preauth-url.\n\nURL:\n$url\n\nReturncode: ".$curl->getinfo(CURLINFO_HTTP_CODE)."\n\nOutput:\n".$stdout."\n\n", $force);
+
+    }
+
+    # get vcf-file
+
+    $url = $publish_config{server_url}."/home/".$publish_config{account}."/".$publish_config{addressbook_name}."?fmt=vcf";
+
+    $curl->setopt(CURLOPT_COOKIEFILE, $cookiejar);
+    $curl->setopt(CURLOPT_URL, $url);
+
+    my $stdout;
+    open (my $fileb, ">", \$stdout);
+    $curl->setopt(CURLOPT_WRITEDATA,$fileb);
+
+    $curl->perform;
+
+    if ($curl->getinfo(CURLINFO_HTTP_CODE) != 200) {
+
+        fault("Can't call preauth-url.\n\nURL:\n$url\n\nReturncode: ".$curl->getinfo(CURLINFO_HTTP_CODE)."\n\nOutput:\n".$stdout."\n\n", $force);
+
+    }
+
+    unlink($cookiejar);
+
+    # Parse VCF to generate LDAP data
+
+    my @lines = split(/\r\n/, $stdout);
+    
+    my $line;
+
+    my $inVCard = 0;
+
+    my @addressbook = ();
+    
+    my $currentaddressbook = {};
+
+    my @afterwork = ();
+
+    for (@lines) {
+
+        if ($_ =~ /BEGIN:VCARD/i) {
+
+            $inVCard = 1;
+
+            $currentaddressbook = {};
+
+            $line = ""; 
+
+            next;
+
+        }
+
+        if ($_ =~ /END:VCARD/i) {
+
+            $inVCard = 0;
+
+            $currentaddressbook->{objectclass} = ['top','person', 'organizationalperson', 'inetorgperson'];
+
+	    while (($key, $value) = each(%alternatives)) {
+
+		if ($currentaddressbook->{$key} eq "") {
+
+			if ($currentaddressbook->{$value} ne "") {
+
+			    $currentaddressbook->{$key} = $currentaddressbook->{$value};
+
+			}
+	
+		}
+
+            }
+
+            push (@addressbook, $currentaddressbook);
+
+            next;
+
+        }
+
+        if ($inVCard) {
+
+            if ($line =~ /^ /) {
+
+                $line .= substr($_, 1, length($_)-1);
+
+                next;
+
+            }
+
+            $line .= $_;
+
+            while (($key, $value) = each(%map)) {
+
+                if ($line =~ qr/$value/i) {
+
+                    my @keys = split(/\|/, $key);
+
+                    my $i = 1;
+
+                    for (@keys) {
+
+                        $valuetoadd = $+{$_};
+
+                        if ($valuetoadd ne "") {
+                            
+                            $currentaddressbook->{$_} = $valuetoadd;
+
+                        }
+
+                        $i++;
+
+                    }
+
+                }
+
+            }
+
+            $line = ""; 
+
+        }
+
+    }
+
+    # Set LDAP-DN
+
+    my $ldap_dn = "ou=".$publish_config{name}.",".$publish_config{base_dn};
+
+    # drop ldap-tree
+
+    if ($publish_config{drop}) {
+
+        # Does the tree already exist?
+
+        $ldapres = $ldap->search( base => $publish_config{base_dn} , filter => "(ou=".$publish_config{name}.")", scope => "one" );
+
+        my @entries = $ldapres->entries;
+
+        if ($#entries == 0) {
+
+            # Tree exists, find sub elements and delete them
+
+            $ldapres = $ldap->search( base => $ldap_dn, filter => "(objectclass=*)", scope => "one" );
+
+            @entries = $ldapres->entries;
+
+            for (@entries) {
+    
+                my %element = %{$_};
+
+                # Drop the element
+
+                $ldapres = $ldap->delete($element{asn}{objectName});
+
+                if ($ldapres->code != 0) {
+	
+                    fault("Cannot delete tree ".$ldap_dn." on LDAP Server ".$publish_config{ldap_url}.": ".$ldapres->error."\n", $force);
+
+                }
+
+            }
+
+            # Drop the tree
+
+            $ldapres = $ldap->delete($ldap_dn);
+
+            if ($ldapres->code != 0) {
+
+                fault("Cannot delete tree ".$ldap_dn." on LDAP Server ".$publish_config{ldap_url}.": ".$ldapres->error."\n", $force);
+
+            }
+
+        }
+
+    }
+
+    # Create Addressbook
+
+    my @addressbook_tree = [
+
+        objectclass => ['top', 'organizationalUnit'],
+        ou => $publish_config{name}
+
+    ];
+
+    $ldapres = $ldap->add($ldap_dn, attr => @addressbook_tree);
+
+    if ($ldapres->code != 0) {
+
+        fault("Cannot add tree ".$ldap_dn." on LDAP Server ".$publish_config{ldap_url}.": ".$ldapres->error."\n", $force);
+
+    }
+
+    # build up ldap-tree
+
+    my $i=1;
+
+    foreach my $itemref (@addressbook) {
+
+        my %item = %{$itemref}; 
+
+        # Add Element. We use a generated uid as dn here, so that multiple cn's can exist
+
+        $ldapres = $ldap->add("uid=".$i.",".$ldap_dn, attr => [%item] );
+
+        if ($ldapres->code != 0) {
+
+            fault("Cannot add element uid=".$i.",".$ldap_dn." (cn=".$item{cn}.") on LDAP Server ".$publish_config{ldap_url}.": ".$ldapres->error."\n", $force);
+
+        }
+
+        $i++;
+       
+    }
+
+    # Unbind from ldap
+
+    $ldap->unbind();
+
+}
+
