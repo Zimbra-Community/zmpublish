@@ -1,0 +1,29 @@
+K 25
+svn:wc:ra_dav:version-url
+V 72
+/svn/zimbra/!svn/ver/289/branches/development/addons/zmpublish/ZmPublish
+END
+ZimbraRetriever.py
+K 25
+svn:wc:ra_dav:version-url
+V 91
+/svn/zimbra/!svn/ver/289/branches/development/addons/zmpublish/ZmPublish/ZimbraRetriever.py
+END
+ZmPublish.py
+K 25
+svn:wc:ra_dav:version-url
+V 85
+/svn/zimbra/!svn/ver/289/branches/development/addons/zmpublish/ZmPublish/ZmPublish.py
+END
+LDAPPublisher.py
+K 25
+svn:wc:ra_dav:version-url
+V 89
+/svn/zimbra/!svn/ver/289/branches/development/addons/zmpublish/ZmPublish/LDAPPublisher.py
+END
+__init__.py
+K 25
+svn:wc:ra_dav:version-url
+V 84
+/svn/zimbra/!svn/ver/289/branches/development/addons/zmpublish/ZmPublish/__init__.py
+END
